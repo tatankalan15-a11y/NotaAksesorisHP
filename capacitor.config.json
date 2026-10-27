@@ -1,0 +1,11 @@
+{
+  "appId": "com.notaservice.aksesoris",
+  "appName": "Nota Aksesoris HP",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
