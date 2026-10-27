@@ -1,0 +1,98 @@
+// Menyiapkan proyek Android: izin Bluetooth, plugin cetak ESC/POS, versionCode, dan signing.
+// Aman dijalankan berulang.
+const fs = require('fs');
+const path = require('path');
+const root = path.join(__dirname, '..');
+const f = path.join(root, 'android/app/src/main/AndroidManifest.xml');
+if (!fs.existsSync(f)) throw new Error('AndroidManifest.xml tidak ditemukan. Jalankan npx cap add android terlebih dahulu.');
+let x = fs.readFileSync(f, 'utf8');
+
+// Namespace tools dibutuhkan untuk usesPermissionFlags pada BLUETOOTH_SCAN
+if (!x.includes('xmlns:tools=')) x = x.replace('<manifest ', '<manifest xmlns:tools="http://schemas.android.com/tools" ');
+
+// Hanya izin Bluetooth (tanpa kamera, kontak, atau penyimpanan).
+const permissions = [
+  '<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />',
+  '<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />',
+  '<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />',
+  '<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="s" />'
+];
+const missing = permissions.filter(p => !x.includes(p.match(/android:name="([^"]+)"/)[1]));
+if (missing.length) {
+  if (!x.includes('<application')) throw new Error('Tag <application> tidak ditemukan di AndroidManifest.xml');
+  x = x.replace('<application', missing.join('\n    ') + '\n    <application');
+}
+fs.writeFileSync(f, x);
+console.log('AndroidManifest.xml berhasil dipatch');
+
+// ---- Plugin native cetak ESC/POS via Bluetooth ----
+const javaDir = path.join(root, 'android/app/src/main/java/com/notaservice/aksesoris');
+fs.mkdirSync(javaDir, { recursive: true });
+fs.copyFileSync(path.join(__dirname, 'native', 'EscPosPrinterPlugin.java'), path.join(javaDir, 'EscPosPrinterPlugin.java'));
+fs.writeFileSync(path.join(javaDir, 'MainActivity.java'), `package com.notaservice.aksesoris;
+
+import android.os.Bundle;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(EscPosPrinterPlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}
+`);
+console.log('Plugin EscPosPrinter berhasil ditambahkan');
+
+// ---- versionCode otomatis naik tiap build (syarat Android agar APK bisa meng-update versi lama) ----
+const gradleFile = path.join(__dirname, '..', 'android/app/build.gradle');
+if (fs.existsSync(gradleFile)) {
+  let g = fs.readFileSync(gradleFile, 'utf8');
+  const code = Math.floor(Date.now() / 60000); // menit sejak 1970, selalu bertambah
+  g = g.replace(/versionCode\s+\d+/, 'versionCode ' + code).replace(/versionName\s+\"[^\"]*\"/, 'versionName "1.0.' + code + '"');
+
+  // Signing release — hanya tembak buildTypes.release (bukan signingConfigs.release)
+  const releaseKs = path.join(__dirname, '..', 'keystore', 'release.keystore');
+  if (fs.existsSync(releaseKs)) {
+    const appKs = path.join(__dirname, '..', 'android', 'app', 'release.keystore');
+    try { fs.copyFileSync(releaseKs, appKs); } catch (_) {}
+
+    const storePass = process.env.RELEASE_STORE_PASSWORD || 'NotaHP2026Release';
+    const keyPass = process.env.RELEASE_KEY_PASSWORD || 'NotaHP2026Release';
+    const keyAlias = process.env.RELEASE_KEY_ALIAS || 'notaservicehp';
+
+    if (!/\bsigningConfigs\s*\{/.test(g)) {
+      const signingBlock =
+        `\n    signingConfigs {\n` +
+        `        release {\n` +
+        `            storeFile file('release.keystore')\n` +
+        `            storePassword '${storePass}'\n` +
+        `            keyAlias '${keyAlias}'\n` +
+        `            keyPassword '${keyPass}'\n` +
+        `        }\n` +
+        `    }\n`;
+      if (/\bbuildTypes\s*\{/.test(g)) {
+        g = g.replace(/\bbuildTypes\s*\{/, signingBlock + '    buildTypes {');
+      }
+    }
+
+    // Sisipkan "signingConfig signingConfigs.release" hanya di dalam buildTypes → release
+    const btIdx = g.search(/\bbuildTypes\s*\{/);
+    if (btIdx >= 0) {
+      const fromBt = g.slice(btIdx);
+      const relInBt = fromBt.search(/\brelease\s*\{/);
+      if (relInBt >= 0) {
+        const absRel = btIdx + relInBt;
+        const brace = g.indexOf('{', absRel);
+        const window = g.slice(brace, brace + 300);
+        if (!window.includes('signingConfig')) {
+          g = g.slice(0, brace + 1) + '\n            signingConfig signingConfigs.release' + g.slice(brace + 1);
+          console.log('Release signingConfig dipasang di buildTypes.release');
+        }
+      }
+    }
+  }
+
+  fs.writeFileSync(gradleFile, g);
+  console.log('versionCode =', code);
+}
